@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "migi-cli"
-version = "0.1.2"
+version = "0.1.3"
 description = "Skill-oriented desktop GUI vision automation CLI for LLM agents with machine-readable JSON output."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,9 +28,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/migi"
-Repository = "https://github.com/example/migi"
-Issues = "https://github.com/example/migi/issues"
+Homepage = "https://github.com/mikuh/migi"
+Repository = "https://github.com/mikuh/migi"
+Issues = "https://github.com/mikuh/migi/issues"
 
 [project.scripts]
 migi = "migi.cli:main"
