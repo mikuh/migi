@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Build & publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for PyPI trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate release tag matches package version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = pyproject["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          normalized_tag = tag[1:] if tag.startswith("v") else tag
+
+          if normalized_tag != version:
+              raise SystemExit(
+                  f"Release tag '{tag}' does not match project.version '{version}' in pyproject.toml"
+              )
+
+          print(f"Version check passed: tag='{tag}', project.version='{version}'")
+          PY
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

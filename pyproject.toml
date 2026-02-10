@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "migi-cli"
+version = "0.1.2"
+description = "Skill-oriented desktop GUI vision automation CLI for LLM agents with machine-readable JSON output."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Migi Contributors" }
+]
+keywords = ["cli", "gui", "automation", "vision", "agent", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities"
+]
+dependencies = [
+  "httpx>=0.27.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/example/migi"
+Repository = "https://github.com/example/migi"
+Issues = "https://github.com/example/migi/issues"
+
+[project.scripts]
+migi = "migi.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/migi"]
+
+[tool.hatch.build]
+include = [
+  "src/migi/assets/**",
+  "README.md"
+]
