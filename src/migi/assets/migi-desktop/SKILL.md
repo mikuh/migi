@@ -1,150 +1,188 @@
 ---
 name: migi
-description: 使用 migi CLI 进行桌面 GUI 视觉自动化。通过截屏理解界面并执行点击、输入、滚动、快捷键等动作。适用于打开应用、操作微信/QQ/浏览器、控制桌面等任务。
+description: 当任务需要识别当前桌面界面并执行 GUI 动作（点击、输入、滚动、快捷键），或需要对本地图片文件做视觉理解时使用此技能；优先先观察再执行，并在界面变化后分步重试。
 ---
 
-# Migi
+# migi
 
-截屏 -> 视觉模型分析 -> 桌面动作执行（支持同屏多动作组合，减少模型调用次数）。
+## 何时使用
 
-## 快速开始
+- 需要基于当前屏幕执行桌面 GUI 自动化：点击、输入、滚动、快捷键。
+- 任务依赖"先看界面，再决定动作"。
+- 需要针对一张本地图片文件做视觉理解（识别元素、文字、布局、关系）。
 
-```bash
-# 1) 首次初始化模型配置（推荐）
-migi setup
+## 何时不要使用
 
-# 2) 仅识别当前屏幕，不执行动作
-migi see "屏幕上有什么应用"
+- 纯 shell 或脚本任务（文件处理、服务管理、接口调用）。
+- 仅通过网页 API 可完成的任务。
+- 安装 skill、安装依赖、发布打包等环境管理任务。
 
-# 3) 识别并执行动作
-migi act "点击搜索框并输入 李白"
+## 速度优化原则
+
+1. **能用 shell 就不用 migi**：打开应用、拷贝文件到剪贴板、打开 URL 等，优先用 shell 命令完成（见下方跨平台 shell 速查表）。
+2. **能直接 `act` 就不要先 `see`**：如果你已经知道界面状态（刚执行过操作、刚 see 过、或任务描述足够明确），直接 `act`。
+3. **指令要简短精确**：冗长指令会增加模型推理时间。用 10-20 字描述核心意图即可。
+4. **同屏多步合并一条 `act`**：如果多个动作在同一界面上且不会引发界面变化，写到一条 `act` 里。
+5. **只在不确定时才 `see`**：界面刚发生跳转、弹窗、刷新等变化后才需要重新观察。
+
+## 跨平台 shell 速查表
+
+| 操作 | macOS | Windows (PowerShell) |
+|---|---|---|
+| 打开应用 | `open -a "AppName"` | `Start-Process "AppName"` |
+| 打开 URL | `open "https://..."` | `Start-Process "https://..."` |
+| 打开文件夹 | `open ~/Documents` | `explorer $HOME\Documents` |
+| 打开系统设置 | `open "x-apple.systempreferences:"` | `Start-Process ms-settings:` |
+| 图片拷贝到剪贴板 | `osascript -e 'set the clipboard to (read (POSIX file "/path/to/img.png") as «class PNGf»)'` | `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('C:\path\to\img.png'))"` |
+| 等待 N 秒 | `sleep N` | `Start-Sleep -Seconds N` |
+
+## 执行决策树
+
+```
+任务到达
+  ├─ 可用 shell 完成？→ 直接 shell，不调 migi
+  ├─ 已知界面状态 + 目标明确？→ migi act "简短指令"
+  ├─ 不确定界面状态？→ migi see "简短问题" → 再 act
+  ├─ 需要分析本地图片？→ migi image <path> "问题"
+  └─ 界面会变化？→ 拆成多步，每步一个 act，变化后再观察
 ```
 
-## 命令总览
+## 指令写法（简短优先）
 
-| 命令 | 用途 |
-|------|------|
-| `migi setup` | 初始化/更新模型配置 |
-| `migi status` | 查看当前生效配置与依赖状态 |
-| `migi see "<指令>"` | 只分析，不执行 GUI 动作 |
-| `migi act "<指令>"` | 分析并执行 GUI 动作 |
-| `migi install --target <app>` | 安装 skill 到已知平台目录 |
-| `migi install --path <custom_dir>` | 安装 skill 到自定义目录 |
+- 点击：`migi act "点击左侧微信图标"`
+- 输入：`migi act "点击搜索框，输入 李白"`
+- 发送文字：`migi act "在输入框输入 你好，按回车"`
+- 粘贴并发送：`migi act "点击输入框，按 Ctrl+V 粘贴，按回车发送"`（migi 会自动适配 macOS Command / Windows Ctrl）
+- 滚动：`migi act "向下滚动一屏"`
+- 图片理解：`migi image ./pic.png "提取所有可见文字"`
+- 锚点写法：用"文案 + 方位"，如"底部输入框"、"搜索结果中的李白"，避免绝对坐标。
 
-## 核心能力
+## 高频任务剧本
 
-### 1) 视觉理解（不触发动作）
+### 打开应用
 
 ```bash
-migi see "屏幕上有什么应用"
-migi see "当前打开的是什么网页"
+# macOS
+open -a "WeChat"
+
+# Windows (PowerShell)
+Start-Process "WeChat"
+
+# 仅在 shell 失败时才用 migi
+migi act "用系统搜索打开微信"
 ```
 
-### 2) 单动作执行
-
-| 操作类型 | 指令示例 |
-|---------|---------|
-| 点击 | `"点击微信图标"` `"点击搜索按钮"` |
-| 双击 | `"双击文件夹"` |
-| 右键 | `"右键点击文件"` |
-| 输入 | `"在搜索框输入 Python"` |
-| 滚动 | `"向下滚动"` `"向上滚动页面"` |
-| 快捷键 | `"按 Command+C"` `"按回车键"` |
-
-### 3) 多动作组合（一次调用，多个动作）
-
-当界面不变化时，模型可一次返回多个动作，减少调用次数。
-
-#### 搜索场景：点击 + 输入
+### 微信发文字消息
 
 ```bash
-migi act "点击搜索框并输入 李白"
-migi act "点击搜索框并输入 Python教程"
-```
+# --- 第 1 步：打开微信 ---
+# macOS
+open -a "WeChat"
+# Windows
+# Start-Process "WeChat"
 
-#### 对话框场景：点击 + 输入 + 回车
+sleep 1  # Windows: Start-Sleep -Seconds 1
 
-```bash
-migi act "点击消息输入框，输入 你好啊 并按回车发送"
-migi act "点击输入框，输入 收到，谢谢！ 然后回车"
-```
-
-适合组合的场景：
-- 搜索场景：点击 + 输入（通常自动触发搜索）
-- 对话框场景：点击 + 输入 + 回车
-
-不适合组合的场景（界面会变化）：
-- 打开应用 -> 等待窗口出现 -> 操作窗口
-- 搜索 -> 等待结果出现 -> 点击结果
-
-## 典型任务示例
-
-### 微信发消息（4 步）
-
-```bash
-# 1) 打开微信
-migi act "点击 Dock 栏的微信图标"
-
-# 2) 搜索联系人
-migi act "点击搜索框并输入 李白"
-
-# 3) 选择联系人
+# --- 第 2 步：搜索联系人 ---
+migi act "点击搜索框，输入 李白"
 migi act "点击搜索结果中的李白"
 
-# 4) 发送消息
-migi act "点击消息输入框，输入 你好啊 并按回车发送"
+# --- 第 3 步：发消息 ---
+migi act "在输入框输入 你好啊，按回车发送"
+```
+
+### 微信发送图片
+
+发送图片的正确方式：先用 shell 将图片拷贝到系统剪贴板，再到微信输入框粘贴发送。
+
+**macOS：**
+
+```bash
+# 1. 将图片拷贝到系统剪贴板
+osascript -e 'set the clipboard to (read (POSIX file "/absolute/path/to/image.png") as «class PNGf»)'
+
+# 2. 在微信输入框粘贴并发送（可附带文字）
+migi act "点击输入框，按 Command+V 粘贴，输入 请看这张图，按回车发送"
+```
+
+**Windows (PowerShell)：**
+
+```powershell
+# 1. 将图片拷贝到系统剪贴板
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile("C:\path\to\image.png"))
+
+# 2. 在微信输入框粘贴并发送
+migi act "点击输入框，按 Ctrl+V 粘贴，输入 请看这张图，按回车发送"
+```
+
+**只发图片不附带文字：**
+
+```bash
+# macOS
+osascript -e 'set the clipboard to (read (POSIX file "/path/to/image.png") as «class PNGf»)'
+migi act "点击输入框，按 Command+V 粘贴，按回车发送"
+
+# Windows (PowerShell)
+# Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile("C:\path\to\image.png"))
+# migi act "点击输入框，按 Ctrl+V 粘贴，按回车发送"
+```
+
+### 微信发送图片完整流程
+
+```bash
+# --- 打开微信并找到联系人 ---
+# macOS
+open -a "WeChat"
+# Windows: Start-Process "WeChat"
+sleep 1
+
+migi act "点击搜索框，输入 小伍"
+migi act "点击搜索结果中的小伍"
+
+# --- 拷贝图片到剪贴板 ---
+# macOS
+osascript -e 'set the clipboard to (read (POSIX file "/path/to/image.png") as «class PNGf»)'
+# Windows (PowerShell): Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile("C:\path\to\image.png"))
+
+# --- 粘贴并发送 ---
+migi act "点击输入框，按 Command+V 粘贴，输入 请查看这张图，按回车发送"
+# Windows: migi act "点击输入框，按 Ctrl+V 粘贴，输入 请查看这张图，按回车发送"
 ```
 
 ### 打开系统设置
 
 ```bash
-migi act "点击左上角苹果图标"
-migi act "点击系统设置"
+# macOS
+open "x-apple.systempreferences:"
+
+# Windows (PowerShell)
+# Start-Process ms-settings:
 ```
 
-### Finder 文件操作
+### 文件管理器操作
 
 ```bash
-migi act "点击 Finder"
-migi act "双击文档文件夹"
+# macOS
+open ~/Documents
+# Windows: explorer $HOME\Documents
+
+# 后续 GUI 操作
 migi act "右键空白处，点击新建文件夹"
 ```
 
-## JSON 输出规范（LLM 友好）
+## 失败恢复
 
-`migi` 默认输出 compact JSON（推荐给 agent / LLM）：
+- 找不到元素：`migi see "当前窗口有哪些可见元素"`，然后用更具体锚点重试。
+- 界面已变化：停止盲操作，`see` 后再继续。
+- 动作未触发：改写为更明确指令重试。
+- 误点或焦点错误：先回到稳定界面（关弹窗/返回上层），再继续。
 
-- 成功：`ok`, `cmd`, `code`, `data`
-- 失败：`ok`, `cmd`, `code`, `error`（必要时附 `data`）
+## 安全与稳定性约束
 
-如需排障可使用 full 模式：
-
-```bash
-migi status --json full
-```
-
-## 配置路径
-
-- 首选：`~/.config/migi/config.json`
-- 若不可写：自动回退到 `~/.migi/config.json`（用户级全局）
-- 可通过 `MIGI_CONFIG_PATH` 指定共享配置路径
-
-## 安装 skill
-
-```bash
-# 安装到全部已知平台（Cursor / Claude Code / OpenCode / NeoStream / Lingxibox）
-migi install --target all
-
-# 安装到 Cursor（默认路径自动探测）
-migi install --target cursor
-
-# 未知应用或手动目录
-migi install --path /path/to/skills
-```
-
-## 注意事项
-
-1. 界面变化后需要重新截图再执行下一步（例如打开应用、切页、搜索后）。
-2. 自动化会真实控制鼠标和键盘，执行期间请勿人工抢占操作。
-3. 输入内容若以 `\\n` 结尾或指令中明确要求回车，会触发发送/确认动作。
-
+- 自动化期间避免人工抢占鼠标键盘。
+- 避免绝对坐标，优先语义锚点定位。
+- 组合动作只用于同屏无变化场景；一旦界面会变，必须拆步。
+- 发送类动作前确认焦点在目标会话，避免误发。
+- 不要用 `which` / `where` 判断 GUI 应用可用性。
+- migi 引擎内部已自动适配 macOS/Windows 的快捷键映射（Command↔Ctrl），指令中写任一种均可。

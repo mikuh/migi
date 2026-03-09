@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from migi.automation.engine import auto_screen_operation
+from migi.automation.engine import auto_image_understanding, auto_screen_operation
 from migi.config import (
     MigiConfig,
     default_config_path,
@@ -65,6 +65,21 @@ def _build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--config-path", dest="config_path")
         run_p.add_argument("--no-exec", action="store_true", help="Disable action execution.")
 
+    image_p = subparsers.add_parser("image", aliases=["vision"], help="Analyze a local image file.")
+    image_p.add_argument("--json", dest="json_mode", choices=["compact", "full"])
+    image_p.add_argument("image_path", help="Path to local image file.")
+    image_p.add_argument(
+        "instruction",
+        nargs="?",
+        default="Describe this image in detail.",
+        help="Instruction or question about the image.",
+    )
+    image_p.add_argument("--api-key", dest="api_key")
+    image_p.add_argument("--model")
+    image_p.add_argument("--base-url", dest="base_url")
+    image_p.add_argument("--provider")
+    image_p.add_argument("--config-path", dest="config_path")
+
     install_p = subparsers.add_parser("install", aliases=["install-skill"], help="Install skill package.")
     install_p.add_argument("--json", dest="json_mode", choices=["compact", "full"])
     install_p.add_argument("--target", choices=["all", *KNOWN_TARGETS], default="all")
@@ -79,6 +94,8 @@ def _canonical_command(args: argparse.Namespace) -> str:
         return "setup"
     if args.command in {"install", "install-skill"}:
         return "install"
+    if args.command in {"image", "vision"}:
+        return "image"
     if args.command == "config" and getattr(args, "config_command", None) == "show":
         return "status"
     return args.command or "help"
@@ -317,6 +334,66 @@ def _handle_see_or_act(args: argparse.Namespace, command: str) -> dict[str, Any]
     )
 
 
+def _handle_image(args: argparse.Namespace) -> dict[str, Any]:
+    builder = ResultBuilder.start("image")
+    cfg_path = Path(args.config_path).expanduser() if args.config_path else resolve_config_path()
+    effective, sources = resolve_runtime_config(
+        cli_api_key=args.api_key,
+        cli_model=args.model,
+        cli_base_url=args.base_url,
+        cli_provider=args.provider,
+        path=cfg_path,
+    )
+    if not effective.api_key:
+        return builder.fail(
+            code="CONFIG_MISSING",
+            message="Missing api key.",
+            error_type="ConfigError",
+            detail="GUI_VISION_API_KEY is not configured.",
+            hint="Run `migi setup` or provide --api-key.",
+            data={"sources": sources},
+        )
+
+    image_path = Path(args.image_path).expanduser()
+    result = auto_image_understanding(
+        instruction=args.instruction,
+        image_path=image_path,
+        api_key=effective.api_key,
+        model_name=effective.model,
+        base_url=effective.base_url,
+    ).to_dict()
+
+    if not result["success"]:
+        return builder.fail(
+            code="IMAGE_ANALYSIS_FAILED",
+            message="Image understanding failed.",
+            error_type="AutomationError",
+            detail=result.get("error") or "Unknown image understanding error.",
+            hint="Check image path, dependencies (pillow), and model configuration.",
+            data={"result": result, "image_path": str(image_path)},
+        )
+
+    return builder.ok(
+        code="IMAGE_ANALYSIS_DONE",
+        message="Image understanding completed.",
+        data={
+            "instruction": args.instruction,
+            "image_path": str(image_path),
+            "model": {
+                "provider": effective.provider,
+                "model": effective.model,
+                "base_url": effective.base_url,
+                "sources": sources,
+            },
+            "analysis": {
+                "response": result["response"],
+            },
+            "timing": result["timing"],
+            "image_size": result["image_size"],
+        },
+    )
+
+
 def _handle_install(args: argparse.Namespace) -> dict[str, Any]:
     builder = ResultBuilder.start("install")
     if args.custom_path and args.target != "all":
@@ -348,6 +425,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return _handle_status(args)
     if command in {"see", "act"}:
         return _handle_see_or_act(args, command)
+    if command == "image":
+        return _handle_image(args)
     if command == "install":
         return _handle_install(args)
     builder = ResultBuilder.start("help")
@@ -356,7 +435,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         message="No command provided.",
         error_type="ArgumentError",
         detail="Run `migi --help` for available commands.",
-        hint="Use one of: see, act, setup, install, status.",
+        hint="Use one of: see, act, image, setup, install, status.",
     )
 
 
@@ -393,4 +472,3 @@ def main(argv: list[str] | None = None) -> int:
         )
         emit_json(payload, mode="compact")
         return 2
-

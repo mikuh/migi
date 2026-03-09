@@ -31,6 +31,7 @@
 
 - Uses screenshots + multimodal model inference to understand current desktop UI
 - Supports instruction-driven automation via `see` (analyze only) and `act` (analyze + execute)
+- Supports local image understanding via `image` / `vision`
 - Returns machine-readable JSON for every command
 - Includes a skill installer for agent platforms
 
@@ -81,6 +82,12 @@ migi act "Click the search box and type Li Bai"
 migi install --target cursor
 ```
 
+5) Understand a local image file:
+
+```bash
+migi image ./example.png "Describe the key objects and visible text."
+```
+
 ### CLI Usage
 
 ```bash
@@ -94,6 +101,7 @@ Core commands:
 - `config show`: alias of `status`
 - `see <instruction>`: analyze screen only
 - `act <instruction>`: analyze and execute actions
+- `image <image_path> [instruction]` / `vision`: analyze a local image file
 - `install`: install skill package(s)
 
 ### Configuration
@@ -157,6 +165,13 @@ def your_parser(response: str, img_width: int, img_height: int, scale_factor: in
     ...
 ```
 
+Coordinate behavior in executor:
+
+- Recommended: normalized `0..1000` coordinate space (independent of screen resolution)
+- Also accepted: `0..1` ratio coordinates
+- Also accepted: absolute screenshot pixel coordinates  
+  (`migi` remaps screenshot coordinates to the actual pyautogui control space for DPI/scaling differences)
+
 ### JSON Output Contract
 
 All commands print exactly one JSON object to stdout.
@@ -183,6 +198,7 @@ Target runtime:
 Runtime dependencies:
 
 - Required package dependency: `httpx`
+- Local image understanding (`image` / `vision`) requires: `pillow`
 - Optional but practically required for GUI automation: `mss`, `pyautogui`, `pyperclip`, `pillow`
 
 Install optional GUI dependencies:
@@ -200,6 +216,14 @@ pip install mss pyautogui pyperclip pillow
   - Ensure model is `doubao-seed` and parser is `doubao`.
 - **Dependency error for GUI modules**
   - Install missing packages: `mss pyautogui pyperclip pillow`.
+- **`which <app>` / `where <app>` returns not found (exit code 1)**
+  - This is expected for many GUI apps (they are not in PATH).
+  - For app launch tasks, `migi` now uses a 3-stage fallback chain:
+    - Direct command launch first (macOS `open`, Windows `Start-Process`)
+    - Then shortcut search (macOS `Command+Space`, Windows `Win+S`)
+    - Then GUI-visible search fallback if shortcut action fails
+    - macOS: `Command+Space` -> type app name -> select the app entry under Applications -> Enter
+    - Windows: `Win+S` -> type app name -> Enter
 - **Config path permission issue**
   - Use `--config-path` or `MIGI_CONFIG_PATH` to a writable location.
 - **Need to use another model**
@@ -250,6 +274,7 @@ pip install mss pyautogui pyperclip pillow
 
 - 通过截图 + 多模态模型理解当前界面
 - 支持 `see`（只分析）与 `act`（分析并执行）
+- 支持 `image` / `vision`（针对本地图片做图像理解）
 - 全部命令输出稳定 JSON，方便程序消费
 - 内置技能安装能力（如 Cursor）
 
@@ -298,6 +323,12 @@ migi act "点击搜索框并输入 李白"
 migi install --target cursor
 ```
 
+5) 理解一张本地图片：
+
+```bash
+migi image ./example.png "这张图里有哪些关键元素和文字？"
+```
+
 ### 命令总览
 
 ```bash
@@ -309,6 +340,7 @@ migi <command> [options]
 - `config show`：`status` 的别名
 - `see <instruction>`：只做视觉分析，不执行动作
 - `act <instruction>`：视觉分析并执行动作
+- `image <image_path> [instruction]` / `vision`：分析本地图片内容
 - `install`：安装技能包
 
 ### 配置方式
@@ -370,6 +402,13 @@ def your_parser(response: str, img_width: int, img_height: int, scale_factor: in
     ...
 ```
 
+执行器坐标兼容策略：
+
+- 推荐使用 `0..1000` 归一化坐标（与屏幕分辨率无关）
+- 兼容 `0..1` 比例坐标
+- 兼容截图像素绝对坐标  
+  （`migi` 会把截图坐标重映射到 pyautogui 实际控制坐标，适配 DPI/缩放差异）
+
 ### JSON 输出协议
 
 所有命令都只向标准输出打印一个 JSON 对象。
@@ -396,6 +435,7 @@ migi status --json full
 依赖说明：
 
 - 必需包依赖：`httpx`
+- 本地图片理解（`image` / `vision`）依赖：`pillow`
 - GUI 自动化常用依赖：`mss`、`pyautogui`、`pyperclip`、`pillow`
 
 安装 GUI 相关依赖：
@@ -413,6 +453,14 @@ pip install mss pyautogui pyperclip pillow
   - 确保模型使用 `doubao-seed`，解析器使用 `doubao`。
 - **出现 GUI 依赖缺失报错**
   - 安装：`mss pyautogui pyperclip pillow`。
+- **`which <app>` / `where <app>` 返回未找到（exit code 1）**
+  - 这是常见现象，很多 GUI 应用并不在 PATH 中。
+  - `migi` 对“打开应用”默认使用三段式回退链路：
+    - 先命令直启（macOS `open`，Windows `Start-Process`）
+    - 再快捷键搜索（macOS `Command+Space`，Windows `Win+S`）
+    - 若快捷键动作失败，再自动走 GUI 可见入口回退流程
+    - macOS：`Command+Space` -> 输入应用名 -> 先选中“应用程序”分组中的目标应用 -> 回车
+    - Windows：`Win+S` -> 输入应用名 -> 回车
 - **配置文件写入失败（权限问题）**
   - 使用 `--config-path` 或 `MIGI_CONFIG_PATH` 指向可写目录。
 - **想接入其他模型**
@@ -435,4 +483,3 @@ pip install mss pyautogui pyperclip pillow
 - 增强动作执行安全与控制能力
 - 完善跨平台自动化测试覆盖
 - 提供更强的解析调试与评估工具
-
