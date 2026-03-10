@@ -111,26 +111,7 @@ Core commands:
 For runtime values, priority is:
 
 1. CLI flags (`--api-key`, `--model`, `--base-url`, etc.)
-2. Environment variables
-3. Config file
-
-#### Environment Variables
-
-- `GUI_VISION_API_KEY`
-- `GUI_VISION_MODEL`
-- `GUI_VISION_BASE_URL`
-- `GUI_VISION_ACTION_PARSER` (`doubao` or `custom`)
-- `GUI_VISION_ACTION_PARSER_CALLABLE` (required if parser is `custom`)
-- `MIGI_CONFIG_PATH` (optional explicit config file path)
-
-Recommended example (current supported setup):
-
-```bash
-export GUI_VISION_API_KEY="YOUR_API_KEY"
-export GUI_VISION_MODEL="doubao-seed"
-export GUI_VISION_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
-export GUI_VISION_ACTION_PARSER="doubao"
-```
+2. Config file (`~/.config/migi/config.json`)
 
 #### Config File Location
 
@@ -138,14 +119,10 @@ Default path:
 
 - `~/.config/migi/config.json` (or `$XDG_CONFIG_HOME/migi/config.json`)
 
-Automatic fallback when default path is not writable:
-
-- `~/.migi/config.json`
-
-You can force a shared/custom path:
+Run `migi setup` to write the config interactively, or set fields via CLI flags:
 
 ```bash
-export MIGI_CONFIG_PATH="/absolute/path/to/config.json"
+migi setup --api-key "YOUR_API_KEY" --model "doubao-seed" --base-url "https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 ### Advanced: Custom Action Parser
@@ -225,7 +202,7 @@ pip install mss pyautogui pyperclip pillow
     - macOS: `Command+Space` -> type app name -> select the app entry under Applications -> Enter
     - Windows: `Win+S` -> type app name -> Enter
 - **Config path permission issue**
-  - Use `--config-path` or `MIGI_CONFIG_PATH` to a writable location.
+  - Use `--config-path` to specify a writable location.
 - **Need to use another model**
   - Switch to `--action-parser custom` and implement `module:function`.
 
@@ -348,26 +325,7 @@ migi <command> [options]
 #### 配置优先级（高到低）
 
 1. 命令行参数（CLI）
-2. 环境变量（ENV）
-3. 配置文件（Config File）
-
-#### 环境变量
-
-- `GUI_VISION_API_KEY`
-- `GUI_VISION_MODEL`
-- `GUI_VISION_BASE_URL`
-- `GUI_VISION_ACTION_PARSER`（`doubao` 或 `custom`）
-- `GUI_VISION_ACTION_PARSER_CALLABLE`（当解析器是 `custom` 时必填）
-- `MIGI_CONFIG_PATH`（可选，指定配置文件路径）
-
-推荐（当前支持组合）：
-
-```bash
-export GUI_VISION_API_KEY="你的密钥"
-export GUI_VISION_MODEL="doubao-seed"
-export GUI_VISION_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
-export GUI_VISION_ACTION_PARSER="doubao"
-```
+2. 配置文件（`~/.config/migi/config.json`）
 
 #### 配置文件路径
 
@@ -375,14 +333,10 @@ export GUI_VISION_ACTION_PARSER="doubao"
 
 - `~/.config/migi/config.json`（或 `$XDG_CONFIG_HOME/migi/config.json`）
 
-默认路径不可写时自动回退：
-
-- `~/.migi/config.json`
-
-你也可以显式指定：
+通过 `migi setup` 交互式写入配置，或通过命令行参数设置：
 
 ```bash
-export MIGI_CONFIG_PATH="/绝对路径/config.json"
+migi setup --api-key "你的密钥" --model "doubao-seed" --base-url "https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 ### 高级用法：自定义解析器
@@ -462,7 +416,7 @@ pip install mss pyautogui pyperclip pillow
     - macOS：`Command+Space` -> 输入应用名 -> 先选中“应用程序”分组中的目标应用 -> 回车
     - Windows：`Win+S` -> 输入应用名 -> 回车
 - **配置文件写入失败（权限问题）**
-  - 使用 `--config-path` 或 `MIGI_CONFIG_PATH` 指向可写目录。
+  - 使用 `--config-path` 指向可写目录。
 - **想接入其他模型**
   - 使用 `--action-parser custom` 并实现 `module:function` 自定义解析器。
 

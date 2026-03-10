@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from migi import __version__
 from migi.automation.engine import auto_image_understanding, auto_screen_operation
 from migi.config import (
     MigiConfig,
@@ -14,7 +15,6 @@ from migi.config import (
     resolve_config_path,
     resolve_runtime_config,
     save_file_config,
-    user_fallback_config_path,
 )
 from migi.installers import KNOWN_TARGETS, install_many, resolve_targets
 from migi.json_result import ResultBuilder, emit_json
@@ -27,6 +27,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(prog="migi", description="Task-oriented GUI automation CLI.")
+    parser.add_argument("--version", action="version", version=f"migi {__version__}")
     parser.add_argument("--json", dest="json_mode", choices=["compact", "full"])
     subparsers = parser.add_subparsers(dest="command")
 
@@ -121,11 +122,11 @@ def _handle_setup(args: argparse.Namespace) -> dict[str, Any]:
 
     if not args.non_interactive and sys.stdin.isatty():
         if api_key is None:
-            api_key = _prompt_value("GUI_VISION_API_KEY (leave blank to keep current): ")
+            api_key = _prompt_value("api_key (leave blank to keep current): ")
         if model is None:
-            model = _prompt_value("GUI_VISION_MODEL (leave blank to keep current): ")
+            model = _prompt_value("model (leave blank to keep current): ")
         if base_url is None:
-            base_url = _prompt_value("GUI_VISION_BASE_URL (leave blank to keep current): ")
+            base_url = _prompt_value("base_url (leave blank to keep current): ")
     if action_parser is not None:
         action_parser = action_parser.strip().lower()
         if action_parser not in {"doubao", "custom"}:
@@ -137,7 +138,7 @@ def _handle_setup(args: argparse.Namespace) -> dict[str, Any]:
                 hint="Use one of: doubao, custom.",
             )
 
-    current = load_file_config(path=resolve_config_path(path=path))
+    current = load_file_config(path=resolve_config_path(path))
     next_cfg = MigiConfig(
         provider=provider or current.provider,
         api_key=api_key if api_key is not None else current.api_key,
@@ -172,29 +173,15 @@ def _handle_setup(args: argparse.Namespace) -> dict[str, Any]:
             hint="Set --action-parser-callable as module:function.",
         )
 
-    fallback_used = False
-    fallback_path = user_fallback_config_path()
     try:
         saved_path = save_file_config(next_cfg, path)
-    except PermissionError as exc:
-        if explicit_path is not None:
-            return builder.fail(
-                code="CONFIG_WRITE_FAILED",
-                message="Failed to write config to explicit path.",
-                error_type="PermissionError",
-                detail=str(exc),
-                hint="Use a writable --config-path.",
-                data={"path": str(path)},
-            )
-        saved_path = save_file_config(next_cfg, fallback_path)
-        fallback_used = True
     except OSError as exc:
         return builder.fail(
             code="CONFIG_WRITE_FAILED",
             message="Failed to write config.",
             error_type=exc.__class__.__name__,
             detail=str(exc),
-            hint="Use `--config-path` to set a writable location.",
+            hint="Use a writable --config-path.",
             data={"path": str(path)},
         )
     validation = {
@@ -209,8 +196,6 @@ def _handle_setup(args: argparse.Namespace) -> dict[str, Any]:
             "config_path": str(saved_path),
             "updated_fields": updated_fields,
             "validation": validation,
-            "fallback_used": fallback_used,
-            "preferred_path": str(path),
         },
     )
 
@@ -271,7 +256,7 @@ def _handle_see_or_act(args: argparse.Namespace, command: str) -> dict[str, Any]
             code="CONFIG_MISSING",
             message="Missing api key.",
             error_type="ConfigError",
-            detail="GUI_VISION_API_KEY is not configured.",
+            detail="api_key is not configured.",
             hint="Run `migi setup` or provide --api-key.",
             data={"sources": sources},
         )
@@ -349,7 +334,7 @@ def _handle_image(args: argparse.Namespace) -> dict[str, Any]:
             code="CONFIG_MISSING",
             message="Missing api key.",
             error_type="ConfigError",
-            detail="GUI_VISION_API_KEY is not configured.",
+            detail="api_key is not configured.",
             hint="Run `migi setup` or provide --api-key.",
             data={"sources": sources},
         )

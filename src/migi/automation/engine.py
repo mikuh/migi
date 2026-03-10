@@ -311,7 +311,7 @@ def call_model_inference(
     base_url: str | None = None,
 ) -> str:
     if not api_key:
-        raise ValueError("GUI_VISION_API_KEY is required. Run `migi setup` or set env variable.")
+        raise ValueError("api_key is required. Run `migi setup` or provide --api-key.")
     model_name = model_name or DEFAULT_MODEL
     base_url = base_url or DEFAULT_BASE_URL
 
