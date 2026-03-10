@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
 
 def default_config_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg).expanduser() / "migi" / "config.json"
-    return Path.home() / ".config" / "migi" / "config.json"
+    return Path.home() / "migi" / "config.json"
 
 
 def resolve_config_path(path: Path | None = None) -> Path:

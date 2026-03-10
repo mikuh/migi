@@ -111,13 +111,13 @@ Core commands:
 For runtime values, priority is:
 
 1. CLI flags (`--api-key`, `--model`, `--base-url`, etc.)
-2. Config file (`~/.config/migi/config.json`)
+2. Config file (`~/migi/config.json`)
 
 #### Config File Location
 
 Default path:
 
-- `~/.config/migi/config.json` (or `$XDG_CONFIG_HOME/migi/config.json`)
+- `~/migi/config.json`
 
 Run `migi setup` to write the config interactively, or set fields via CLI flags:
 
@@ -325,13 +325,13 @@ migi <command> [options]
 #### 配置优先级（高到低）
 
 1. 命令行参数（CLI）
-2. 配置文件（`~/.config/migi/config.json`）
+2. 配置文件（`~/migi/config.json`）
 
 #### 配置文件路径
 
 默认：
 
-- `~/.config/migi/config.json`（或 `$XDG_CONFIG_HOME/migi/config.json`）
+- `~/migi/config.json`
 
 通过 `migi setup` 交互式写入配置，或通过命令行参数设置：
 
