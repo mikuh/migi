@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "migi-cli"
-version = "0.3.1"
+version = "0.3.2"
 description = "Skill-oriented desktop GUI vision automation CLI for LLM agents with machine-readable JSON output."
 readme = "README.md"
 requires-python = ">=3.11"

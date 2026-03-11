@@ -7,7 +7,7 @@ from typing import Any
 
 
 def default_config_path() -> Path:
-    return Path.home() / "migi" / "config.json"
+    return Path.home() / ".migi" / "config.json"
 
 
 def resolve_config_path(path: Path | None = None) -> Path:
