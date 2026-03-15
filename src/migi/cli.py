@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from migi import __version__
-from migi.automation.engine import auto_image_understanding, auto_screen_operation
+from migi.automation.engine import (
+    CAPTURE_MODE_CHOICES,
+    DEFAULT_PERFORMANCE_PROFILE,
+    DEFAULT_CAPTURE_MODE,
+    PERFORMANCE_PROFILES,
+    auto_image_understanding,
+    auto_screen_operation,
+)
 from migi.config import (
     MigiConfig,
     default_config_path,
@@ -23,6 +30,9 @@ from migi.json_result import ResultBuilder, emit_json
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ValueError(message)
+
+
+PERFORMANCE_CHOICES = tuple(PERFORMANCE_PROFILES.keys())
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,6 +73,24 @@ def _build_parser() -> argparse.ArgumentParser:
         run_p.add_argument("--provider")
         run_p.add_argument("--action-parser", choices=["doubao", "custom"])
         run_p.add_argument("--action-parser-callable", dest="action_parser_callable")
+        run_p.add_argument(
+            "--performance",
+            choices=PERFORMANCE_CHOICES,
+            default=DEFAULT_PERFORMANCE_PROFILE,
+            help="Latency/accuracy profile for screenshots and model calls.",
+        )
+        run_p.add_argument(
+            "--max-steps",
+            type=int,
+            default=1 if cmd_name == "see" else 3,
+            help="Maximum screenshot->infer->act iterations for this command.",
+        )
+        run_p.add_argument(
+            "--capture-mode",
+            choices=CAPTURE_MODE_CHOICES,
+            default=DEFAULT_CAPTURE_MODE,
+            help="Capture the full screen or prefer the current front window.",
+        )
         run_p.add_argument("--config-path", dest="config_path")
         run_p.add_argument("--no-exec", action="store_true", help="Disable action execution.")
 
@@ -79,6 +107,12 @@ def _build_parser() -> argparse.ArgumentParser:
     image_p.add_argument("--model")
     image_p.add_argument("--base-url", dest="base_url")
     image_p.add_argument("--provider")
+    image_p.add_argument(
+        "--performance",
+        choices=PERFORMANCE_CHOICES,
+        default=DEFAULT_PERFORMANCE_PROFILE,
+        help="Latency/accuracy profile for image upload and model calls.",
+    )
     image_p.add_argument("--config-path", dest="config_path")
 
     install_p = subparsers.add_parser("install", aliases=["install-skill"], help="Install skill package.")
@@ -279,6 +313,9 @@ def _handle_see_or_act(args: argparse.Namespace, command: str) -> dict[str, Any]
         action_parser=effective.action_parser,
         action_parser_callable=effective.action_parser_callable,
         execute_action=execute_action,
+        performance_profile=args.performance,
+        capture_mode=args.capture_mode,
+        max_steps=args.max_steps,
     ).to_dict()
 
     if not result["success"]:
@@ -296,6 +333,9 @@ def _handle_see_or_act(args: argparse.Namespace, command: str) -> dict[str, Any]
         message="Automation completed.",
         data={
             "instruction": args.instruction,
+            "performance": args.performance,
+            "max_steps": args.max_steps,
+            "capture_mode": args.capture_mode,
             "model": {
                 "provider": effective.provider,
                 "model": effective.model,
@@ -346,6 +386,7 @@ def _handle_image(args: argparse.Namespace) -> dict[str, Any]:
         api_key=effective.api_key,
         model_name=effective.model,
         base_url=effective.base_url,
+        performance_profile=args.performance,
     ).to_dict()
 
     if not result["success"]:
@@ -364,6 +405,7 @@ def _handle_image(args: argparse.Namespace) -> dict[str, Any]:
         data={
             "instruction": args.instruction,
             "image_path": str(image_path),
+            "performance": args.performance,
             "model": {
                 "provider": effective.provider,
                 "model": effective.model,

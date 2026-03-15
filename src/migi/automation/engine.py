@@ -17,25 +17,101 @@ from typing import Any, Callable
 
 COORDINATE_SCALE = 1000
 SCREENSHOT_FORMAT = "jpeg"
-SCREENSHOT_QUALITY = 80
 
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_PERFORMANCE_PROFILE = "balanced"
+DEFAULT_CAPTURE_MODE = "auto"
 
 MAX_PIXELS = 16384 * 28 * 28
 MIN_PIXELS = 100 * 28 * 28
 PIXELS_PER_SCROLL_CLICK = 15
 
-SCREENSHOT_MAX_LONG_EDGE = 1920
-ACTION_INTER_STEP_DELAY = 0.08
-ACTION_CLIPBOARD_SYNC_DELAY = 0.05
-ACTION_PASTE_SETTLE_DELAY = 0.12
-ACTION_PRE_EXEC_DELAY = 0.08
-ACTION_HOTKEY_INTERVAL = 0.05
-ACTION_WAIT_DURATION = 2.0
-
 _mss_instance: Any | None = None
-_httpx_client: Any | None = None
+_httpx_clients: dict[float, Any] = {}
+_last_window_region_macos: CaptureRegion | None = None
+
+
+@dataclass(frozen=True)
+class PerformanceTuning:
+    name: str
+    screenshot_quality: int
+    screenshot_max_long_edge: int
+    request_timeout_seconds: float
+    computer_use_max_tokens: int | None
+    image_max_tokens: int | None
+    action_inter_step_delay: float
+    action_clipboard_sync_delay: float
+    action_paste_settle_delay: float
+    action_pre_exec_delay: float
+    action_hotkey_interval: float
+    action_wait_duration: float
+
+
+@dataclass(frozen=True)
+class CaptureRegion:
+    left: int
+    top: int
+    width: int
+    height: int
+    source: str
+
+
+@dataclass(frozen=True)
+class WeChatSendRequest:
+    recipient: str
+    content: str
+
+
+PERFORMANCE_PROFILES: dict[str, PerformanceTuning] = {
+    "fast": PerformanceTuning(
+        name="fast",
+        screenshot_quality=60,
+        screenshot_max_long_edge=1366,
+        request_timeout_seconds=60.0,
+        computer_use_max_tokens=192,
+        image_max_tokens=384,
+        action_inter_step_delay=0.04,
+        action_clipboard_sync_delay=0.03,
+        action_paste_settle_delay=0.06,
+        action_pre_exec_delay=0.04,
+        action_hotkey_interval=0.03,
+        action_wait_duration=1.0,
+    ),
+    "balanced": PerformanceTuning(
+        name="balanced",
+        screenshot_quality=70,
+        screenshot_max_long_edge=1600,
+        request_timeout_seconds=90.0,
+        computer_use_max_tokens=256,
+        image_max_tokens=512,
+        action_inter_step_delay=0.08,
+        action_clipboard_sync_delay=0.05,
+        action_paste_settle_delay=0.12,
+        action_pre_exec_delay=0.08,
+        action_hotkey_interval=0.05,
+        action_wait_duration=2.0,
+    ),
+    "accurate": PerformanceTuning(
+        name="accurate",
+        screenshot_quality=80,
+        screenshot_max_long_edge=1920,
+        request_timeout_seconds=120.0,
+        computer_use_max_tokens=384,
+        image_max_tokens=768,
+        action_inter_step_delay=0.08,
+        action_clipboard_sync_delay=0.05,
+        action_paste_settle_delay=0.12,
+        action_pre_exec_delay=0.08,
+        action_hotkey_interval=0.05,
+        action_wait_duration=2.0,
+    ),
+}
+
+CAPTURE_MODE_CHOICES = ("auto", "screen", "window")
+KNOWN_APP_ALIASES: dict[str, list[str]] = {
+    "WeChat": ["wechat", "微信"],
+}
 
 
 class DependencyError(RuntimeError):
@@ -102,6 +178,10 @@ IMPORTANT: Only use multiple <action> tags when they can execute on CURRENT scre
 ## Safety and Fallback Rules (STRICT)
 - Before any click, verify the target is clearly visible in CURRENT screenshot.
 - Never click guessed coordinates.
+- When the task is to search/filter inside the current app, prefer the app's standard search shortcut first (macOS: command f, Windows/Linux: ctrl f) before clicking small search fields.
+- For messaging tasks, do not type or send until the CURRENT screenshot clearly shows the exact recipient chat is selected.
+- If a recipient name is provided, search and select that recipient first whenever the CURRENT screenshot does not clearly confirm the chat header or selected conversation matches the recipient.
+- Do not use window-management shortcuts like close tab/window or quit app unless the user explicitly asked to close, quit, exit, or dismiss something.
 - Runtime may have already attempted command-based launch (e.g., macOS `open`, Windows `Start-Process`) before this step.
 - If user asks to open/launch an app and its icon is not visible, use app search instead of random clicking.
 - Never rely on shell checks like `which`, `where`, or `Get-Command` for GUI app availability.
@@ -111,9 +191,12 @@ IMPORTANT: Only use multiple <action> tags when they can execute on CURRENT scre
   1) <action>hotkey(key='{search_hotkey}')</action>
   2) <action>type(content='AppName')</action>
   3) Confirm an application result is visible (e.g. in "Applications/应用程序") and target exactly matches app name.
-  4) Only then open it (click that app result or navigate to it, then Enter).
-  5) If top result is not an application (e.g. message/contact/document), do NOT press Enter on it.
+  4) If the exact application result is already highlighted or first in system search, prefer <action>hotkey(key='enter')</action>.
+  5) Otherwise open it by clicking the exact app result or navigating to it, then Enter if needed.
+  6) If top result is not an application (e.g. message/contact/document), do NOT press Enter on it.
 - If the target is still uncertain, use wait() or finished(content='target not visible') instead of clicking.
+- Action history may include prior attempts. If a prior click/type did not visibly change the UI in the CURRENT screenshot, do not assume it succeeded.
+- Only use finished(content='...') when the CURRENT screenshot visibly confirms the task is complete.
 
 ## Action Space
 click(point='<point>x1 y1</point>')
@@ -170,7 +253,26 @@ def safe_literal_eval(value: str) -> Any:
     return ast.literal_eval(value)
 
 
-def _downscale_if_needed(image: Any, max_long_edge: int = SCREENSHOT_MAX_LONG_EDGE) -> Any:
+def resolve_performance_tuning(profile: str | None = None) -> PerformanceTuning:
+    profile_name = (profile or DEFAULT_PERFORMANCE_PROFILE).strip().lower()
+    tuning = PERFORMANCE_PROFILES.get(profile_name)
+    if tuning is None:
+        supported = ", ".join(sorted(PERFORMANCE_PROFILES))
+        raise ValueError(f"Unsupported performance profile: {profile_name}. Use one of: {supported}.")
+    return tuning
+
+
+def resolve_capture_mode(capture_mode: str | None = None, app_launch_intent: bool = False) -> str:
+    mode = (capture_mode or DEFAULT_CAPTURE_MODE).strip().lower()
+    if mode not in CAPTURE_MODE_CHOICES:
+        supported = ", ".join(CAPTURE_MODE_CHOICES)
+        raise ValueError(f"Unsupported capture mode: {mode}. Use one of: {supported}.")
+    if mode == "auto":
+        return "screen" if app_launch_intent else "window"
+    return mode
+
+
+def _downscale_if_needed(image: Any, max_long_edge: int) -> Any:
     w, h = image.size
     long_edge = max(w, h)
     if long_edge <= max_long_edge:
@@ -205,26 +307,117 @@ def _get_mss_instance(mss_module: Any) -> Any:
     return _mss_instance
 
 
+def _primary_monitor_region(sct: Any) -> CaptureRegion:
+    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+    return CaptureRegion(
+        left=int(monitor.get("left", 0)),
+        top=int(monitor.get("top", 0)),
+        width=int(monitor["width"]),
+        height=int(monitor["height"]),
+        source="screen",
+    )
+
+
+def _front_window_region_macos(timeout_seconds: float = 0.8) -> CaptureRegion | None:
+    global _last_window_region_macos
+    script = """
+tell application "System Events"
+    set frontApp to first application process whose frontmost is true
+    tell frontApp
+        if (count of windows) is 0 then
+            return ""
+        end if
+        set frontWindow to front window
+        set {xPos, yPos} to position of frontWindow
+        set {winWidth, winHeight} to size of frontWindow
+        return (xPos as text) & tab & (yPos as text) & tab & (winWidth as text) & tab & (winHeight as text)
+    end tell
+end tell
+"""
+    try:
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        return _last_window_region_macos
+    if completed.returncode != 0:
+        return _last_window_region_macos
+    raw = completed.stdout.strip()
+    if not raw:
+        return _last_window_region_macos
+    parts = raw.split("\t")
+    if len(parts) != 4:
+        return _last_window_region_macos
+    try:
+        left, top, width, height = (int(part) for part in parts)
+    except ValueError:
+        return _last_window_region_macos
+    if width <= 0 or height <= 0:
+        return _last_window_region_macos
+    region = CaptureRegion(left=left, top=top, width=width, height=height, source="window")
+    _last_window_region_macos = region
+    return region
+
+
+def _clamp_region_to_monitor(region: CaptureRegion, monitor: CaptureRegion) -> CaptureRegion | None:
+    left = max(region.left, monitor.left)
+    top = max(region.top, monitor.top)
+    right = min(region.left + region.width, monitor.left + monitor.width)
+    bottom = min(region.top + region.height, monitor.top + monitor.height)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return None
+    return CaptureRegion(left=left, top=top, width=width, height=height, source=region.source)
+
+
 def capture_screenshot(
     deps: dict[str, Any],
-    quality: int = SCREENSHOT_QUALITY,
+    quality: int,
     fmt: str = SCREENSHOT_FORMAT,
-) -> tuple[Any, int, int, str]:
+    max_long_edge: int = PERFORMANCE_PROFILES[DEFAULT_PERFORMANCE_PROFILE].screenshot_max_long_edge,
+    capture_mode: str = DEFAULT_CAPTURE_MODE,
+    app_launch_intent: bool = False,
+) -> tuple[Any, int, int, str, CaptureRegion]:
     sct = _get_mss_instance(deps["mss"])
-    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-    sct_img = sct.grab(monitor)
+    monitor_region = _primary_monitor_region(sct)
+    effective_mode = resolve_capture_mode(capture_mode, app_launch_intent=app_launch_intent)
+    capture_region = monitor_region
+    if effective_mode == "window" and platform.system() == "Darwin":
+        window_region = _front_window_region_macos()
+        clamped_region = (
+            _clamp_region_to_monitor(window_region, monitor_region)
+            if window_region is not None
+            else None
+        )
+        if clamped_region is not None:
+            capture_region = clamped_region
+
+    sct_img = sct.grab(
+        {
+            "left": capture_region.left,
+            "top": capture_region.top,
+            "width": capture_region.width,
+            "height": capture_region.height,
+        }
+    )
     screenshot = deps["Image"].frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
     width, height = screenshot.size
-    encoded = _downscale_if_needed(screenshot)
+    encoded = _downscale_if_needed(screenshot, max_long_edge=max_long_edge)
     base64_data = _encode_image_from_pil(encoded, fmt, quality)
-    return screenshot, width, height, base64_data
+    return screenshot, width, height, base64_data, capture_region
 
 
 def load_image_file(
     deps: dict[str, Any],
     image_path: str | Path,
-    quality: int = SCREENSHOT_QUALITY,
+    quality: int,
     fmt: str = SCREENSHOT_FORMAT,
+    max_long_edge: int = PERFORMANCE_PROFILES[DEFAULT_PERFORMANCE_PROFILE].screenshot_max_long_edge,
 ) -> tuple[Any, int, int, str]:
     path = Path(image_path).expanduser()
     if not path.exists():
@@ -235,7 +428,8 @@ def load_image_file(
     with deps["Image"].open(path) as image:
         loaded = image.copy()
     width, height = loaded.size
-    base64_data = _encode_image_from_pil(loaded, fmt, quality)
+    encoded = _downscale_if_needed(loaded, max_long_edge=max_long_edge)
+    base64_data = _encode_image_from_pil(encoded, fmt, quality)
     return loaded, width, height, base64_data
 
 
@@ -248,7 +442,72 @@ def _platform_search_hint() -> tuple[str, str, str]:
     return "Linux", "desktop app search", "ctrl space"
 
 
-def build_conversation(instruction: str, base64_image: str, image_format: str = "jpeg") -> list[dict[str, Any]]:
+def _format_action_history(action_history: list[str] | None) -> str | None:
+    if not action_history:
+        return None
+    trimmed = [item.strip() for item in action_history if item.strip()]
+    if not trimmed:
+        return None
+    recent = trimmed[-12:]
+    return "[Action History]\n" + "\n".join(recent)
+
+
+def _extract_message_recipient(instruction: str) -> str | None:
+    text = instruction.strip()
+    if not text:
+        return None
+    patterns = [
+        r"给\s*([A-Za-z0-9_\-\u4e00-\u9fff.]+)\s*发送?微信(?:消息)?",
+        r"给\s*([A-Za-z0-9_\-\u4e00-\u9fff.]+)\s*发微信(?:消息)?",
+        r"\bon\s+wechat\s+to\s+([A-Za-z0-9_.\-]+)\b",
+        r"\bsend\s+.*?\bto\s+([A-Za-z0-9_.\-]+)\b.*\bwechat\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            recipient = match.group(1).strip().strip("'\"`“”‘’")
+            if recipient:
+                return recipient
+    return None
+
+
+def _extract_message_content(instruction: str) -> str | None:
+    text = instruction.strip()
+    if not text:
+        return None
+    patterns = [
+        r"(?:说|内容是|内容为)\s*[\"'“”‘’]?(.*?)[\"'“”‘’]?\s*$",
+        r"(?:message|say|saying)\s*[\"'“”‘’]?(.*?)[\"'“”‘’]?\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        content = match.group(1).strip()
+        content = content.strip("。.!！？")
+        if content:
+            return content
+    return None
+
+
+def _extract_wechat_send_request(instruction: str) -> WeChatSendRequest | None:
+    if _extract_target_app_name(instruction) != "WeChat":
+        return None
+    recipient = _extract_message_recipient(instruction)
+    content = _extract_message_content(instruction)
+    if not recipient or not content:
+        return None
+    return WeChatSendRequest(recipient=recipient, content=content)
+
+
+def build_conversation(
+    instruction: str,
+    base64_image: str,
+    image_format: str = "jpeg",
+    action_history: list[str] | None = None,
+    step_index: int | None = None,
+    recipient_hint: str | None = None,
+) -> list[dict[str, Any]]:
     os_name, search_entry, search_hotkey = _platform_search_hint()
     system_prompt = COMPUTER_USE_PROMPT.format(
         instruction=instruction,
@@ -256,10 +515,18 @@ def build_conversation(instruction: str, base64_image: str, image_format: str = 
         search_entry=search_entry,
         search_hotkey=search_hotkey,
     )
-    image_content = [
+    image_content: list[dict[str, Any]] = []
+    if step_index is not None:
+        image_content.append({"type": "text", "text": f"[Step {step_index}]"})
+    if recipient_hint:
+        image_content.append({"type": "text", "text": f"[Recipient]\n{recipient_hint}"})
+    history_text = _format_action_history(action_history)
+    if history_text:
+        image_content.append({"type": "text", "text": history_text})
+    image_content.extend([
         {"type": "text", "text": "[Current Screenshot]"},
         {"type": "image_url", "image_url": {"url": f"data:image/{image_format};base64,{base64_image}"}},
-    ]
+    ])
     return [
         {"role": "user", "content": system_prompt},
         {"role": "user", "content": image_content},
@@ -282,6 +549,25 @@ def build_image_understanding_messages(
     ]
 
 
+def _wechat_search_hotkey() -> str:
+    return "command f" if platform.system() == "Darwin" else "ctrl f"
+
+
+def _select_all_hotkey() -> str:
+    return "command a" if platform.system() == "Darwin" else "ctrl a"
+
+
+def _build_wechat_recipient_selection_instruction(recipient: str) -> str:
+    return (
+        f"You are inside WeChat. The goal is to select the chat for recipient '{recipient}'. "
+        "The recipient name is already known. "
+        "If the CURRENT screenshot clearly shows that the active chat header or selected conversation is exactly this recipient, "
+        "output <action>finished(content='recipient_selected')</action>. "
+        "Otherwise, click the exact recipient result or conversation entry for this recipient. "
+        "Do not type any text. Do not send any message. Do not use close/quit shortcuts."
+    )
+
+
 def _normalize_chat_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -296,11 +582,15 @@ def _normalize_chat_content(content: Any) -> str:
     return str(content)
 
 
-def _get_httpx_client(deps: dict[str, Any]) -> Any:
-    global _httpx_client
-    if _httpx_client is None:
-        _httpx_client = deps["httpx"].Client(timeout=120)
-    return _httpx_client
+def _get_httpx_client(deps: dict[str, Any], timeout_seconds: float) -> Any:
+    client = _httpx_clients.get(timeout_seconds)
+    if client is None:
+        try:
+            client = deps["httpx"].Client(timeout=timeout_seconds, http2=True)
+        except ImportError:
+            client = deps["httpx"].Client(timeout=timeout_seconds)
+        _httpx_clients[timeout_seconds] = client
+    return client
 
 
 def call_model_inference(
@@ -309,6 +599,8 @@ def call_model_inference(
     api_key: str,
     model_name: str | None = None,
     base_url: str | None = None,
+    timeout_seconds: float = PERFORMANCE_PROFILES[DEFAULT_PERFORMANCE_PROFILE].request_timeout_seconds,
+    max_tokens: int | None = None,
 ) -> str:
     if not api_key:
         raise ValueError("api_key is required. Run `migi setup` or provide --api-key.")
@@ -327,8 +619,16 @@ def call_model_inference(
         "messages": messages,
         "temperature": 0.0,
     }
-    client = _get_httpx_client(deps)
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    client = _get_httpx_client(deps, timeout_seconds=timeout_seconds)
     response = client.post(endpoint, headers=headers, json=payload)
+    if response.status_code >= 400 and max_tokens is not None and response.status_code in {400, 422}:
+        retry_payload = dict(payload)
+        retry_payload.pop("max_tokens", None)
+        retry_response = client.post(endpoint, headers=headers, json=retry_payload)
+        if retry_response.status_code < 400:
+            response = retry_response
     if response.status_code >= 400:
         raise ValueError(
             f"Model request failed ({response.status_code}): {response.text[:500]}"
@@ -357,6 +657,7 @@ def _point_to_screen_xy(
     point: list[Any] | tuple[Any, ...],
     image_width: int,
     image_height: int,
+    capture_region: CaptureRegion,
     screen_width: int,
     screen_height: int,
     scale_factor: int,
@@ -374,7 +675,12 @@ def _point_to_screen_xy(
 
     # Support ratio coordinates from some model outputs, e.g. 0.52 0.31.
     if abs(x) <= 1 and abs(y) <= 1:
-        return _clamp((x * screen_width, y * screen_height))
+        return _clamp(
+            (
+                capture_region.left + (x * capture_region.width),
+                capture_region.top + (y * capture_region.height),
+            )
+        )
 
     # If screenshot is low resolution (<= scale), "pixel coords" and "normalized coords"
     # can overlap; prefer treating in-image values as absolute pixels in that case.
@@ -387,14 +693,14 @@ def _point_to_screen_xy(
     if abs(x) <= scale_factor and abs(y) <= scale_factor and not low_res_pixel_like:
         return _clamp(
             (
-                x * screen_width / scale_factor,
-                y * screen_height / scale_factor,
+                capture_region.left + (x * capture_region.width / scale_factor),
+                capture_region.top + (y * capture_region.height / scale_factor),
             )
         )
 
     # Treat as absolute screenshot pixels and remap to pyautogui coordinate space.
-    mapped_x = x * screen_width / image_width if image_width > 0 else x
-    mapped_y = y * screen_height / image_height if image_height > 0 else y
+    mapped_x = capture_region.left + (x * capture_region.width / image_width if image_width > 0 else x)
+    mapped_y = capture_region.top + (y * capture_region.height / image_height if image_height > 0 else y)
     return _clamp((mapped_x, mapped_y))
 
 
@@ -402,6 +708,7 @@ def _box_to_screen_xy(
     box: list[Any] | tuple[Any, ...],
     image_width: int,
     image_height: int,
+    capture_region: CaptureRegion,
     screen_width: int,
     screen_height: int,
     scale_factor: int,
@@ -413,6 +720,7 @@ def _box_to_screen_xy(
             [x, y],
             image_width,
             image_height,
+            capture_region,
             screen_width,
             screen_height,
             scale_factor,
@@ -421,6 +729,7 @@ def _box_to_screen_xy(
         box,
         image_width,
         image_height,
+        capture_region,
         screen_width,
         screen_height,
         scale_factor,
@@ -432,8 +741,12 @@ def execute_pyautogui_action(
     responses: dict[str, Any] | list[dict[str, Any]],
     image_height: int,
     image_width: int,
+    capture_region: CaptureRegion,
     scale_factor: int = 1000,
+    tuning: PerformanceTuning | None = None,
+    allow_window_management_hotkeys: bool = False,
 ) -> list[str]:
+    tuning = tuning or resolve_performance_tuning()
     pyautogui = deps["pyautogui"]
     pyperclip = deps["pyperclip"]
     screen_width, screen_height = pyautogui.size()
@@ -444,7 +757,7 @@ def execute_pyautogui_action(
     result_info: list[str] = []
     for index, response in enumerate(responses):
         if index > 0:
-            time.sleep(ACTION_INTER_STEP_DELAY)
+            time.sleep(tuning.action_inter_step_delay)
         action_type = response.get("action_type")
         action_inputs = response.get("action_inputs", {})
 
@@ -460,12 +773,12 @@ def execute_pyautogui_action(
             content = action_inputs.get("content", "")
             if content:
                 pyperclip.copy(content)
-                time.sleep(ACTION_CLIPBOARD_SYNC_DELAY)
+                time.sleep(tuning.action_clipboard_sync_delay)
                 if platform.system() == "Darwin":
-                    pyautogui.hotkey("command", "v", interval=ACTION_HOTKEY_INTERVAL)
+                    pyautogui.hotkey("command", "v", interval=tuning.action_hotkey_interval)
                 else:
-                    pyautogui.hotkey("ctrl", "v", interval=ACTION_HOTKEY_INTERVAL)
-                time.sleep(ACTION_PASTE_SETTLE_DELAY)
+                    pyautogui.hotkey("ctrl", "v", interval=tuning.action_hotkey_interval)
+                time.sleep(tuning.action_paste_settle_delay)
                 if content.endswith("\n") or content.endswith("\\n"):
                     pyautogui.press("enter")
                 result_info.append(f"type:{content[:50]}")
@@ -481,6 +794,7 @@ def execute_pyautogui_action(
                     start_box,
                     image_width,
                     image_height,
+                    capture_region,
                     screen_width,
                     screen_height,
                     scale_factor,
@@ -489,6 +803,7 @@ def execute_pyautogui_action(
                     end_box,
                     image_width,
                     image_height,
+                    capture_region,
                     screen_width,
                     screen_height,
                     scale_factor,
@@ -507,6 +822,7 @@ def execute_pyautogui_action(
                     start_box,
                     image_width,
                     image_height,
+                    capture_region,
                     screen_width,
                     screen_height,
                     scale_factor,
@@ -527,6 +843,7 @@ def execute_pyautogui_action(
                     start_box,
                     image_width,
                     image_height,
+                    capture_region,
                     screen_width,
                     screen_height,
                     scale_factor,
@@ -578,19 +895,24 @@ def execute_pyautogui_action(
                         result_info.append(f"hotkey_skipped:unknown={'+'.join(unknown)}")
                         continue
                 try:
+                    combo_signature = "+".join(mapped)
+                    blocked_hotkeys = {"command+w", "ctrl+w", "command+q", "alt+f4"}
+                    if not allow_window_management_hotkeys and combo_signature in blocked_hotkeys:
+                        result_info.append(f"hotkey_skipped:blocked={combo_signature}")
+                        continue
                     if len(mapped) == 1:
                         pyautogui.press(mapped[0])
                     else:
-                        pyautogui.hotkey(*mapped, interval=ACTION_HOTKEY_INTERVAL)
-                    result_info.append(f"hotkey:{'+'.join(mapped)}")
+                        pyautogui.hotkey(*mapped, interval=tuning.action_hotkey_interval)
+                    result_info.append(f"hotkey:{combo_signature}")
                 except Exception as exc:  # noqa: BLE001
                     result_info.append(f"hotkey_failed:{type(exc).__name__}")
         elif action_type == "finished":
             result_info.append("finished")
             return result_info
         elif action_type == "wait":
-            time.sleep(ACTION_WAIT_DURATION)
-            result_info.append(f"wait:{ACTION_WAIT_DURATION}s")
+            time.sleep(tuning.action_wait_duration)
+            result_info.append(f"wait:{tuning.action_wait_duration}s")
     return result_info
 
 
@@ -659,6 +981,32 @@ def _looks_like_app_launch_instruction(instruction: str) -> bool:
     return bool(re.search(r"(打开|启动|运行)\s*\S+", text))
 
 
+def _extract_target_app_name(instruction: str) -> str | None:
+    text = instruction.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    for canonical_name, aliases in KNOWN_APP_ALIASES.items():
+        for alias in aliases:
+            if alias.isascii():
+                if re.search(rf"\b{re.escape(alias)}\b", lowered, re.IGNORECASE):
+                    return canonical_name
+            elif alias in text:
+                return canonical_name
+    return None
+
+
+def _is_launch_only_instruction(instruction: str) -> bool:
+    text = instruction.strip()
+    if not _looks_like_app_launch_instruction(text):
+        return False
+    if re.search(r"\b(and|then|after|search|type|click|send|message)\b", text, re.IGNORECASE):
+        return False
+    if re.search(r"(然后|再|并|给|发送|点击|输入|搜索|消息)", text):
+        return False
+    return True
+
+
 def _extract_app_name_from_instruction(instruction: str) -> str | None:
     text = instruction.strip()
     if not text:
@@ -683,7 +1031,7 @@ def _extract_app_name_from_instruction(instruction: str) -> str | None:
     cleaned = re.sub(r"\s+(app|application)$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"(应用程序|应用)$", "", cleaned)
     cleaned = cleaned.strip(" -:_")
-    return cleaned or None
+    return cleaned or _extract_target_app_name(instruction)
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -704,12 +1052,11 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 def _app_name_candidates(app_name: str) -> list[str]:
     base = app_name.strip()
     key = base.lower()
-    aliases: dict[str, list[str]] = {
-        "wechat": ["WeChat", "微信"],
-        "微信": ["WeChat", "微信"],
-    }
     candidates = [base]
-    candidates.extend(aliases.get(key, []))
+    for canonical_name, alias_group in KNOWN_APP_ALIASES.items():
+        values = [canonical_name, *alias_group]
+        if key in {value.lower() for value in values}:
+            candidates.extend(values)
     return _dedupe_keep_order(candidates)
 
 
@@ -788,8 +1135,8 @@ def _run_launch_command(command: list[str], timeout_seconds: float = 8.0) -> tup
     return False, detail[:120]
 
 
-def _try_direct_app_launch(instruction: str) -> tuple[bool, list[str]]:
-    app_name = _extract_app_name_from_instruction(instruction)
+def _try_direct_app_launch(instruction: str, app_name: str | None = None) -> tuple[bool, list[str]]:
+    app_name = app_name or _extract_app_name_from_instruction(instruction)
     if not app_name:
         return False, ["direct_launch_skipped:no_app_name"]
 
@@ -823,6 +1170,15 @@ def _build_app_launch_fallback_instruction(instruction: str) -> str:
         "Do not use app-search hotkey now. "
         "Use visible GUI controls to open search, then select the exact application result before opening."
     )
+
+
+def _instruction_allows_window_management_hotkeys(instruction: str) -> bool:
+    text = instruction.strip()
+    if not text:
+        return False
+    if re.search(r"\b(close|quit|exit|dismiss|hide|minimize)\b", text, re.IGNORECASE):
+        return True
+    return bool(re.search(r"(关闭|退出|最小化|隐藏|收起|关掉)", text))
 
 
 def _extract_point_arg(args: str, name: str) -> list[float] | None:
@@ -897,9 +1253,12 @@ def parse_and_execute_action(
     response: str,
     img_height: int,
     img_width: int,
+    capture_region: CaptureRegion,
     action_parser: str = "builtin",
     action_parser_callable: str | None = None,
     scale_factor: int = 1000,
+    tuning: PerformanceTuning | None = None,
+    allow_window_management_hotkeys: bool = False,
 ) -> tuple[bool, list[str], str | None]:
     action_strings = _split_multi_actions(response)
     parsed_all: list[dict[str, Any]] = []
@@ -956,8 +1315,200 @@ def parse_and_execute_action(
         first_type = parsed_all[0].get("action_type")
     if not parsed_all:
         return False, [], None
-    result = execute_pyautogui_action(deps, parsed_all, img_height, img_width, scale_factor)
+    result = execute_pyautogui_action(
+        deps,
+        parsed_all,
+        img_height,
+        img_width,
+        capture_region,
+        scale_factor,
+        tuning=tuning,
+        allow_window_management_hotkeys=allow_window_management_hotkeys,
+    )
     return True, result, first_type
+
+
+def _run_wechat_send_flow(
+    deps: dict[str, Any],
+    request: WeChatSendRequest,
+    api_key: str,
+    model_name: str | None,
+    base_url: str | None,
+    action_parser: str,
+    action_parser_callable: str | None,
+    performance_profile: str,
+    max_steps: int,
+) -> AutomationResult:
+    timing: dict[str, float] = {}
+    total_start = time.perf_counter()
+    tuning = resolve_performance_tuning(performance_profile)
+    max_attempts = max(1, min(max_steps, 3))
+    action_history: list[str] = []
+    response_chunks: list[str] = []
+    execution_result: list[str] = []
+    img_width = img_height = 0
+    capture_region = CaptureRegion(left=0, top=0, width=0, height=0, source="screen")
+
+    def _capture_window(label: str) -> tuple[int, int, str, CaptureRegion]:
+        nonlocal img_width, img_height, capture_region
+        step = time.perf_counter()
+        _, img_width, img_height, base64_image, capture_region = capture_screenshot(
+            deps,
+            quality=tuning.screenshot_quality,
+            max_long_edge=tuning.screenshot_max_long_edge,
+            capture_mode="window",
+            app_launch_intent=False,
+        )
+        timing[label] = timing.get(label, 0.0) + (time.perf_counter() - step) * 1000
+        return img_width, img_height, base64_image, capture_region
+
+    try:
+        step = time.perf_counter()
+        direct_ok, direct_steps = _try_direct_app_launch(
+            f"打开微信并准备给 {request.recipient} 发消息",
+            app_name="WeChat",
+        )
+        timing["direct_launch_ms"] = (time.perf_counter() - step) * 1000
+        execution_result.extend(direct_steps)
+        if direct_ok:
+            action_history.append("WeChat brought to foreground by direct launch.")
+
+        timing["wechat_search_screenshot_ms"] = 0.0
+        step = time.perf_counter()
+        search_actions = [
+            {"action_type": "hotkey", "action_inputs": {"key": _wechat_search_hotkey()}},
+            {"action_type": "hotkey", "action_inputs": {"key": _select_all_hotkey()}},
+            {"action_type": "type", "action_inputs": {"content": request.recipient}},
+            {"action_type": "hotkey", "action_inputs": {"key": "enter"}},
+        ]
+        search_steps = execute_pyautogui_action(
+            deps=deps,
+            responses=search_actions,
+            image_height=max(img_height, 1),
+            image_width=max(img_width, 1),
+            capture_region=capture_region,
+            tuning=tuning,
+            allow_window_management_hotkeys=False,
+        )
+        timing["wechat_search_execution_ms"] = (time.perf_counter() - step) * 1000
+        execution_result.extend(search_steps)
+        action_history.append(
+            "WeChat deterministic search steps: "
+            + (", ".join(search_steps) if search_steps else "no_action")
+        )
+
+        recipient_selected = False
+        for attempt in range(1, max_attempts + 1):
+            _, _, base64_image, current_region = _capture_window(f"wechat_select_step_{attempt}_screenshot_ms")
+            selection_instruction = _build_wechat_recipient_selection_instruction(request.recipient)
+            step = time.perf_counter()
+            messages = build_conversation(
+                selection_instruction,
+                base64_image,
+                SCREENSHOT_FORMAT,
+                action_history=action_history,
+                step_index=attempt,
+                recipient_hint=request.recipient,
+            )
+            timing[f"wechat_select_step_{attempt}_build_conv_ms"] = (time.perf_counter() - step) * 1000
+
+            step = time.perf_counter()
+            response = call_model_inference(
+                deps,
+                messages,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url,
+                timeout_seconds=tuning.request_timeout_seconds,
+                max_tokens=tuning.computer_use_max_tokens,
+            )
+            timing[f"wechat_select_step_{attempt}_inference_ms"] = (time.perf_counter() - step) * 1000
+            response_chunks.append(f"# WeChat Select {attempt}\n{response}")
+            action_history.append(f"WeChat select attempt {attempt} response: {response}")
+
+            step = time.perf_counter()
+            triggered, step_result, step_type = parse_and_execute_action(
+                deps=deps,
+                response=response,
+                img_height=img_height,
+                img_width=img_width,
+                capture_region=current_region,
+                action_parser=action_parser,
+                action_parser_callable=action_parser_callable,
+                scale_factor=COORDINATE_SCALE,
+                tuning=tuning,
+                allow_window_management_hotkeys=False,
+            )
+            timing[f"wechat_select_step_{attempt}_execution_ms"] = (time.perf_counter() - step) * 1000
+            execution_result.extend(step_result)
+            action_history.append(
+                "WeChat select attempt "
+                f"{attempt} execution: "
+                + (", ".join(step_result) if step_result else "no_action")
+            )
+
+            if step_type == "finished" or any(item == "finished" for item in step_result):
+                recipient_selected = True
+                break
+            if not triggered:
+                break
+
+        if not recipient_selected:
+            timing["total_ms"] = (time.perf_counter() - total_start) * 1000
+            return AutomationResult(
+                success=False,
+                image_size=(img_width, img_height) if img_width and img_height else None,
+                response="\n\n".join(response_chunks) if response_chunks else None,
+                execution_result=execution_result,
+                action_triggered=bool(execution_result),
+                action_type="wechat_send",
+                timing=timing,
+                error=f"WeChat recipient '{request.recipient}' was not confirmed before sending.",
+            )
+
+        timing["wechat_send_screenshot_ms"] = 0.0
+        step = time.perf_counter()
+        send_steps = execute_pyautogui_action(
+            deps=deps,
+            responses=[
+                {"action_type": "type", "action_inputs": {"content": request.content}},
+                {"action_type": "hotkey", "action_inputs": {"key": "enter"}},
+            ],
+            image_height=max(img_height, 1),
+            image_width=max(img_width, 1),
+            capture_region=capture_region,
+            tuning=tuning,
+            allow_window_management_hotkeys=False,
+        )
+        timing["wechat_send_execution_ms"] = (time.perf_counter() - step) * 1000
+        execution_result.extend(send_steps)
+        action_history.append(
+            "WeChat send execution: " + (", ".join(send_steps) if send_steps else "no_action")
+        )
+
+        timing["total_ms"] = (time.perf_counter() - total_start) * 1000
+        return AutomationResult(
+            success=True,
+            image_size=(img_width, img_height),
+            response="\n\n".join(response_chunks) if response_chunks else "finished(content='wechat_send_flow_complete')",
+            execution_result=execution_result,
+            action_triggered=True,
+            action_type="wechat_send",
+            timing=timing,
+            error=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        timing["total_ms"] = (time.perf_counter() - total_start) * 1000
+        return AutomationResult(
+            success=False,
+            image_size=(img_width, img_height) if img_width and img_height else None,
+            response="\n\n".join(response_chunks) if response_chunks else None,
+            execution_result=execution_result or None,
+            action_triggered=bool(execution_result),
+            action_type="wechat_send",
+            timing=timing,
+            error=str(exc),
+        )
 
 
 def auto_image_understanding(
@@ -966,14 +1517,21 @@ def auto_image_understanding(
     api_key: str,
     model_name: str | None = None,
     base_url: str | None = None,
+    performance_profile: str = DEFAULT_PERFORMANCE_PROFILE,
 ) -> AutomationResult:
     timing: dict[str, float] = {}
     total_start = time.perf_counter()
     try:
         deps = _import_vision_dependencies()
+        tuning = resolve_performance_tuning(performance_profile)
 
         step = time.perf_counter()
-        _, img_width, img_height, base64_image = load_image_file(deps, image_path)
+        _, img_width, img_height, base64_image = load_image_file(
+            deps,
+            image_path,
+            quality=tuning.screenshot_quality,
+            max_long_edge=tuning.screenshot_max_long_edge,
+        )
         timing["image_load_ms"] = (time.perf_counter() - step) * 1000
 
         step = time.perf_counter()
@@ -987,6 +1545,8 @@ def auto_image_understanding(
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
+            timeout_seconds=tuning.request_timeout_seconds,
+            max_tokens=tuning.image_max_tokens,
         )
         timing["inference_ms"] = (time.perf_counter() - step) * 1000
 
@@ -1023,20 +1583,56 @@ def auto_screen_operation(
     action_parser: str = "builtin",
     action_parser_callable: str | None = None,
     execute_action: bool = True,
+    performance_profile: str = DEFAULT_PERFORMANCE_PROFILE,
+    capture_mode: str = DEFAULT_CAPTURE_MODE,
+    max_steps: int = 1,
 ) -> AutomationResult:
     timing: dict[str, float] = {}
     total_start = time.perf_counter()
     try:
         deps = _import_gui_dependencies()
-        app_launch_intent = _looks_like_app_launch_instruction(instruction)
+        tuning = resolve_performance_tuning(performance_profile)
+        max_steps = max(1, int(max_steps))
+        wechat_send_request = _extract_wechat_send_request(instruction) if execute_action else None
+        if wechat_send_request is not None:
+            return _run_wechat_send_flow(
+                deps=deps,
+                request=wechat_send_request,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url,
+                action_parser=action_parser,
+                action_parser_callable=action_parser_callable,
+                performance_profile=performance_profile,
+                max_steps=max_steps,
+            )
+        explicit_launch_intent = _looks_like_app_launch_instruction(instruction)
+        target_app_name = _extract_target_app_name(instruction)
+        recipient_hint = _extract_message_recipient(instruction)
+        allow_window_management_hotkeys = _instruction_allows_window_management_hotkeys(instruction)
+        app_launch_intent = explicit_launch_intent or target_app_name is not None
+        needs_launch_context = app_launch_intent
         pre_execution_steps: list[str] = []
+        action_history: list[str] = []
+        response_chunks: list[str] = []
+        execution_result: list[str] | None = None
+        action_triggered = False
+        action_type: str | None = None
+        img_width = img_height = 0
+        capture_region = CaptureRegion(left=0, top=0, width=0, height=0, source="screen")
+
+        def _record_timing(name: str, value_ms: float, step_index: int) -> None:
+            timing[name] = timing.get(name, 0.0) + value_ms
+            timing[f"step_{step_index}_{name}"] = value_ms
 
         if execute_action and app_launch_intent:
             step = time.perf_counter()
-            direct_ok, direct_steps = _try_direct_app_launch(instruction)
+            direct_ok, direct_steps = _try_direct_app_launch(instruction, app_name=target_app_name)
             timing["direct_launch_ms"] = (time.perf_counter() - step) * 1000
             pre_execution_steps.extend(direct_steps)
             if direct_ok:
+                needs_launch_context = False
+            if direct_ok and _is_launch_only_instruction(instruction):
                 timing["total_ms"] = (time.perf_counter() - total_start) * 1000
                 return AutomationResult(
                     success=True,
@@ -1049,51 +1645,105 @@ def auto_screen_operation(
                     error=None,
                 )
 
-        step = time.perf_counter()
-        _, img_width, img_height, base64_image = capture_screenshot(deps)
-        timing["screenshot_ms"] = (time.perf_counter() - step) * 1000
-
-        step = time.perf_counter()
-        messages = build_conversation(instruction, base64_image, SCREENSHOT_FORMAT)
-        timing["build_conv_ms"] = (time.perf_counter() - step) * 1000
-
-        step = time.perf_counter()
-        response = call_model_inference(deps, messages, api_key=api_key, model_name=model_name, base_url=base_url)
-        timing["inference_ms"] = (time.perf_counter() - step) * 1000
-
-        execution_result: list[str] | None = None
-        action_triggered = False
-        action_type: str | None = None
-
-        if execute_action:
+        for step_index in range(1, max_steps + 1):
             step = time.perf_counter()
-            time.sleep(ACTION_PRE_EXEC_DELAY)
-            action_triggered, execution_result, action_type = parse_and_execute_action(
+            _, img_width, img_height, base64_image, capture_region = capture_screenshot(
+                deps,
+                quality=tuning.screenshot_quality,
+                max_long_edge=tuning.screenshot_max_long_edge,
+                capture_mode=capture_mode,
+                app_launch_intent=needs_launch_context,
+            )
+            _record_timing("screenshot_ms", (time.perf_counter() - step) * 1000, step_index)
+
+            step = time.perf_counter()
+            messages = build_conversation(
+                instruction,
+                base64_image,
+                SCREENSHOT_FORMAT,
+                action_history=action_history,
+                step_index=step_index if max_steps > 1 else None,
+                recipient_hint=recipient_hint,
+            )
+            _record_timing("build_conv_ms", (time.perf_counter() - step) * 1000, step_index)
+
+            step = time.perf_counter()
+            response = call_model_inference(
+                deps,
+                messages,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url,
+                timeout_seconds=tuning.request_timeout_seconds,
+                max_tokens=tuning.computer_use_max_tokens,
+            )
+            _record_timing("inference_ms", (time.perf_counter() - step) * 1000, step_index)
+            response_chunks.append(response if max_steps == 1 else f"# Step {step_index}\n{response}")
+            action_history.append(f"Step {step_index} model response: {response}")
+
+            if not execute_action:
+                break
+
+            step = time.perf_counter()
+            time.sleep(tuning.action_pre_exec_delay)
+            step_triggered, step_result, step_type = parse_and_execute_action(
                 deps=deps,
                 response=response,
                 img_height=img_height,
                 img_width=img_width,
+                capture_region=capture_region,
                 action_parser=action_parser,
                 action_parser_callable=action_parser_callable,
                 scale_factor=COORDINATE_SCALE,
+                tuning=tuning,
+                allow_window_management_hotkeys=allow_window_management_hotkeys,
             )
-            timing["execution_ms"] = (time.perf_counter() - step) * 1000
-            if pre_execution_steps:
-                execution_result = [*pre_execution_steps, *(execution_result or [])]
+            _record_timing("execution_ms", (time.perf_counter() - step) * 1000, step_index)
+            if execution_result is None:
+                execution_result = []
+                if pre_execution_steps:
+                    execution_result.extend(pre_execution_steps)
+            execution_result.extend(step_result)
+            action_history.append(
+                "Step "
+                f"{step_index} execution result: "
+                + (", ".join(step_result) if step_result else "no_action")
+            )
+
+            if step_triggered:
+                action_triggered = True
+                action_type = step_type or action_type
+            if not step_triggered:
+                break
+            if any(item == "finished" for item in step_result):
+                break
 
             # For app launch intents: if shortcut execution failed, retry once with GUI fallback guidance.
-            if app_launch_intent and _has_hotkey_failure(execution_result):
+            if app_launch_intent and _has_hotkey_failure(step_result):
                 step = time.perf_counter()
-                _, fb_img_width, fb_img_height, fb_base64_image = capture_screenshot(deps)
-                timing["fallback_screenshot_ms"] = (time.perf_counter() - step) * 1000
+                _, fb_img_width, fb_img_height, fb_base64_image, fb_capture_region = capture_screenshot(
+                    deps,
+                    quality=tuning.screenshot_quality,
+                    max_long_edge=tuning.screenshot_max_long_edge,
+                    capture_mode=capture_mode,
+                    app_launch_intent=needs_launch_context,
+                )
+                timing["fallback_screenshot_ms"] = timing.get("fallback_screenshot_ms", 0.0) + (
+                    (time.perf_counter() - step) * 1000
+                )
 
                 step = time.perf_counter()
                 fallback_messages = build_conversation(
                     _build_app_launch_fallback_instruction(instruction),
                     fb_base64_image,
                     SCREENSHOT_FORMAT,
+                    action_history=action_history,
+                    step_index=step_index,
+                    recipient_hint=recipient_hint,
                 )
-                timing["fallback_build_conv_ms"] = (time.perf_counter() - step) * 1000
+                timing["fallback_build_conv_ms"] = timing.get("fallback_build_conv_ms", 0.0) + (
+                    (time.perf_counter() - step) * 1000
+                )
 
                 step = time.perf_counter()
                 fallback_response = call_model_inference(
@@ -1102,36 +1752,51 @@ def auto_screen_operation(
                     api_key=api_key,
                     model_name=model_name,
                     base_url=base_url,
+                    timeout_seconds=tuning.request_timeout_seconds,
+                    max_tokens=tuning.computer_use_max_tokens,
                 )
-                timing["fallback_inference_ms"] = (time.perf_counter() - step) * 1000
+                timing["fallback_inference_ms"] = timing.get("fallback_inference_ms", 0.0) + (
+                    (time.perf_counter() - step) * 1000
+                )
+                response_chunks.append(f"# Step {step_index} fallback\n{fallback_response}")
+                action_history.append(f"Step {step_index} fallback response: {fallback_response}")
 
                 step = time.perf_counter()
-                time.sleep(ACTION_PRE_EXEC_DELAY)
+                time.sleep(tuning.action_pre_exec_delay)
                 fb_triggered, fb_result, fb_type = parse_and_execute_action(
                     deps=deps,
                     response=fallback_response,
                     img_height=fb_img_height,
                     img_width=fb_img_width,
+                    capture_region=fb_capture_region,
                     action_parser=action_parser,
                     action_parser_callable=action_parser_callable,
                     scale_factor=COORDINATE_SCALE,
+                    tuning=tuning,
+                    allow_window_management_hotkeys=allow_window_management_hotkeys,
                 )
-                timing["fallback_execution_ms"] = (time.perf_counter() - step) * 1000
+                timing["fallback_execution_ms"] = timing.get("fallback_execution_ms", 0.0) + (
+                    (time.perf_counter() - step) * 1000
+                )
+                execution_result.extend(fb_result)
+                action_history.append(
+                    "Step "
+                    f"{step_index} fallback execution result: "
+                    + (", ".join(fb_result) if fb_result else "no_action")
+                )
 
                 if fb_triggered:
                     action_triggered = True
-                    if execution_result is None:
-                        execution_result = []
-                    execution_result.extend(fb_result)
                     if action_type in {None, "hotkey"}:
                         action_type = fb_type
-                response = f"{response}\n\n# Fallback pass\n{fallback_response}"
+                if any(item == "finished" for item in fb_result):
+                    break
 
         timing["total_ms"] = (time.perf_counter() - total_start) * 1000
         return AutomationResult(
             success=True,
             image_size=(img_width, img_height),
-            response=response,
+            response="\n\n".join(response_chunks) if response_chunks else None,
             execution_result=execution_result,
             action_triggered=action_triggered,
             action_type=action_type,

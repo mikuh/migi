@@ -76,6 +76,12 @@ migi see "What apps are visible on the screen?"
 migi act "Click the search box and type Li Bai"
 ```
 
+If you prefer lower latency, use the faster runtime profile:
+
+```bash
+migi act --performance fast "Click the search box and type Li Bai"
+```
+
 4) Install skill package:
 
 ```bash
@@ -103,6 +109,29 @@ Core commands:
 - `act <instruction>`: analyze and execute actions
 - `image <image_path> [instruction]` / `vision`: analyze a local image file
 - `install`: install skill package(s)
+
+Performance profile:
+
+- `--performance balanced` (default): a faster default balance for most GUI tasks
+- `--performance fast`: smaller screenshots, tighter limits, lowest latency
+- `--performance accurate`: larger screenshots and more generous outputs for tiny text / dense UIs
+
+Multi-step execution:
+
+- `migi act` now supports `--max-steps N` and defaults to `3`
+- Use higher values for cross-screen tasks such as opening an app, searching, then sending a message
+- App-targeted tasks such as "send a WeChat message" now try to bring the target app to the foreground before visual steps begin
+- Recipient-targeted messaging instructions now carry the recipient hint forward so the model is less likely to send into the currently open chat by mistake
+- Non-essential close/quit shortcuts such as `Cmd+W` are now blocked unless the instruction explicitly asks to close or quit something
+- After the target app is brought to the foreground, `auto` capture can narrow back down to the front window for the remaining steps
+- WeChat text-message instructions in the form `给 <recipient> 发送微信消息，说 <content>` now use a specialized flow: foreground WeChat, search recipient, confirm the chat, then send
+- That specialized flow now tries `Enter` on the first search result before falling back to visual contact clicking
+
+Capture mode:
+
+- `--capture-mode auto` (default): prefer the front window for in-app tasks, but keep full-screen capture for app-launch flows
+- `--capture-mode window`: focus perception on the current front window
+- `--capture-mode screen`: keep full-screen capture when you need Dock / desktop / cross-app context
 
 ### Configuration
 
@@ -191,6 +220,16 @@ pip install mss pyautogui pyperclip pillow
 - **No action executed after `act`**
   - Start with `migi see "..."` to inspect response first.
   - Ensure model is `doubao-seed` and parser is `doubao`.
+- **`act` / `image` feels slow**
+  - Run with `--performance fast` first.
+  - `migi` now downsizes screenshots and local images before upload; `accurate` keeps larger inputs when you need more detail.
+  - Use `--json full` and inspect `timing.inference_ms` vs `timing.screenshot_ms` to see whether the slowdown is model-side or local.
+- **Complex tasks stop after only one visible step**
+  - Increase `--max-steps`, for example: `migi act --max-steps 3 "..."`
+  - `migi` now carries forward action history between steps, but cross-screen flows still depend heavily on model quality and visible UI confirmation.
+- **The model keeps clicking the wrong small control in the active app**
+  - Prefer `--capture-mode window` so the model sees only the front window instead of the whole desktop.
+  - Use `--capture-mode screen` only when you explicitly need desktop-wide context.
 - **Dependency error for GUI modules**
   - Install missing packages: `mss pyautogui pyperclip pillow`.
 - **`which <app>` / `where <app>` returns not found (exit code 1)**
@@ -294,6 +333,12 @@ migi see "屏幕上有哪些应用？"
 migi act "点击搜索框并输入 李白"
 ```
 
+如果你更在意响应速度，可以直接切到快速档：
+
+```bash
+migi act --performance fast "点击搜索框并输入 李白"
+```
+
 4) 安装 Cursor 技能包：
 
 ```bash
@@ -319,6 +364,29 @@ migi <command> [options]
 - `act <instruction>`：视觉分析并执行动作
 - `image <image_path> [instruction]` / `vision`：分析本地图片内容
 - `install`：安装技能包
+
+性能档位：
+
+- `--performance balanced`（默认）：兼顾速度与识别稳定性
+- `--performance fast`：更小的截图、更紧的输出限制，延迟最低
+- `--performance accurate`：更大的截图和更宽松的输出上限，适合小字或复杂界面
+
+多步执行：
+
+- `migi act` 现在支持 `--max-steps N`，默认是 `3`
+- 对于“打开应用 -> 搜索 -> 发送消息”这类跨界面任务，可以适当调高
+- 像“发送微信消息”这类明确点名应用的任务，现在会在视觉步骤开始前优先尝试把目标应用切到前台
+- 像“给某人发微信消息”这类带收件人的指令，现在会把收件人提示带进后续推理，降低误发到当前会话的概率
+- 像 `Cmd+W` 这类非必要的关闭/退出快捷键现在会默认被拦截，除非指令明确要求关闭或退出
+- 当目标应用已经被切到前台后，`auto` 截图模式会优先收回到前台窗口，减少后续步骤的整屏干扰
+- 像 `给 <收件人> 发送微信消息，说 <内容>` 这样的微信纯文字指令，现在会优先命中专用流程：切前台、搜索联系人、确认会话、再发送
+- 这个专用流程在输入联系人后会先尝试用回车打开首个搜索结果，不行再回退到视觉点选
+
+截图模式：
+
+- `--capture-mode auto`（默认）：应用内任务优先看前台窗口，打开应用这类任务仍保留全屏截图
+- `--capture-mode window`：只看当前前台窗口，适合点小控件、搜索框、输入框
+- `--capture-mode screen`：保留全屏截图，适合需要看 Dock、桌面、跨应用上下文的任务
 
 ### 配置方式
 
@@ -405,6 +473,16 @@ pip install mss pyautogui pyperclip pillow
 - **执行 `act` 没有动作**
   - 先用 `migi see "..."` 检查模型输出。
   - 确保模型使用 `doubao-seed`，解析器使用 `doubao`。
+- **`act` / `image` 运行偏慢**
+  - 先试试 `--performance fast`。
+  - 现在 `migi` 会在上传前自动缩小截图和本地图片；如果你需要更细的小字识别，再切回 `--performance accurate`。
+  - 用 `--json full` 查看 `timing.inference_ms` 和 `timing.screenshot_ms`，可以快速判断是模型推理慢还是本地处理慢。
+- **复杂任务只走了一步就停了**
+  - 可以调高 `--max-steps`，例如：`migi act --max-steps 3 "..."`
+  - 现在 `migi` 会把前一步动作历史带进下一轮推理，但跨界面任务依然很依赖模型质量和界面是否清晰可见。
+- **模型总是点偏当前应用里的小控件**
+  - 优先使用 `--capture-mode window`，让模型只看前台窗口而不是整个桌面。
+  - 只有明确需要桌面全局信息时，再切回 `--capture-mode screen`。
 - **出现 GUI 依赖缺失报错**
   - 安装：`mss pyautogui pyperclip pillow`。
 - **`which <app>` / `where <app>` 返回未找到（exit code 1）**
